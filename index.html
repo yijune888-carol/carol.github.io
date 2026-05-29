@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>國產建材 職場健康安全分析儀表板</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;900&display=swap');
+    body { font-family: 'Noto Sans TC', 'Microsoft JhengHei', sans-serif; background: #f0f4f8; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    .risk-badge { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 9999px; font-size: 11px; font-weight: 700; }
+    .section-card { background: white; border-radius: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8edf2; padding: 24px; margin-bottom: 28px; }
+    .kpi-card { background: white; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8edf2; padding: 18px 20px; display: flex; align-items: center; gap: 16px; }
+    .progress-bar { height: 8px; border-radius: 4px; background: #e2e8f0; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+    .heat-cell { padding: 6px 10px; border-radius: 8px; border: 1px solid; text-align: center; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="initial-loader" class="fixed inset-0 flex flex-col items-center justify-center bg-slate-50 z-50">
+    <i class="fa-solid fa-spinner fa-spin text-5xl text-blue-500 mb-4"></i>
+    <h2 class="text-2xl font-bold text-slate-700">正在載入儀表板...</h2>
+    <p class="text-slate-500 mt-2">同步雲端問卷資料中</p>
+  </div>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+    const {
+      BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip: RTooltip, Legend, ResponsiveContainer,
+      PieChart, Pie, Cell, Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+      ScatterChart, Scatter, ZAxis, LabelList
+    } = window.Recharts;
+
+    const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRFlE8LYovMYXEvXpzjZCFEYo-1DLCxMoV0kmJIHv3C__fIRtlaOoC9x6pVLJl160JDcczY5JLmoNiQ/pub?output=csv';
+    const REFRESH_INTERVAL = 5 * 60 * 1000; // 每5分鐘自動更新
+
+    const C = {
+      blue: '#3b82f6', sky: '#0ea5e9', teal: '#14b8a6',
+      green: '#10b981', yellow: '#f59e0b', orange: '#f97316',
+      red: '#ef4444', purple: '#8b5cf6', pink: '#ec4899',
+      slate: '#64748b',
+      pie: ['#10b981','#f59e0b','#ef4444','#8b5cf6','#0ea5e9','#f97316'],
+      risk: ['#10b981','#f59e0b','#f97316','#ef4444']
+    };
+
+    const extractNumber = (str) => {
+      if (!str) return 0;
+      const m = str.toString().match(/(\d+)/);
+      return m ? parseInt(m[0], 10) : 0;
+    };
+
+    // ── BSRS 計分：問卷選項為文字，需對照轉換 ──
+    const bsrsMap = { '完全沒有': 0, '輕微': 1, '中等程度': 2, '厲害': 3, '非常厲害': 4 };
+    const bsrsScore = (str) => {
+      if (!str) return 0;
+      for (const [k, v] of Object.entries(bsrsMap)) { if (str.includes(k)) return v; }
+      return extractNumber(str); // fallback
+    };
+
+    const processRow = (row) => {
+      // 個人疲勞 (6題, 每題 0/25/50/75/100)
+      const pf = [
+        extractNumber(row['個人疲勞問卷6題 [1.你常覺得疲勞嗎?]']),
+        extractNumber(row['個人疲勞問卷6題 [2.你常覺得身體上體力透支嗎?]']),
+        extractNumber(row['個人疲勞問卷6題 [3.你常覺得情緒上心力交瘁嗎?]']),
+        extractNumber(row['個人疲勞問卷6題 [4.你常覺得我快要撐不下去嗎?]']),
+        extractNumber(row['個人疲勞問卷6題 [5.你常覺得精疲力竭嗎?]']),
+        extractNumber(row['個人疲勞問卷6題 [6.你常常覺得虛弱，好像快要生病了嗎?]'])
+      ];
+      const pfAvg = pf.reduce((a, b) => a + b, 0) / 6;
+
+      // 工作疲勞 (7題, Q7反向)
+      const wfQ7raw = extractNumber(row['工作疲勞問卷7題 [7.不工作的時候，你有足夠的精力陪朋友或家人嗎?(反向題)]']);
+      const wf = [
+        extractNumber(row['工作疲勞問卷7題 [1.你的工作會令人情緒上心力交瘁嗎?]']),
+        extractNumber(row['工作疲勞問卷7題 [你的工作會讓你覺得快要累垮了嗎?]']),
+        extractNumber(row['工作疲勞問卷7題 [3.你的工作會讓你覺得挫折嗎?]']),
+        extractNumber(row['工作疲勞問卷7題 [4.工作一整天之後，你覺得精疲力竭嗎?]']),
+        extractNumber(row['工作疲勞問卷7題 [5.上班之前只要想到又要工作一整天，你就覺得沒力嗎?]']),
+        extractNumber(row['工作疲勞問卷7題 [6.上班時你會覺得每一刻都很難熬嗎?]']),
+        100 - wfQ7raw
+      ];
+      const wfAvg = wf.reduce((a, b) => a + b, 0) / 7;
+
+      // BSRS-5
+      const bs = [
+        bsrsScore(row['簡式健康量表 [1.睡眠困難，譬如難以入睡、易醒或早醒]']),
+        bsrsScore(row['簡式健康量表 [2.感覺緊張不安]']),
+        bsrsScore(row['簡式健康量表 [3.覺得容易苦惱或動怒]']),
+        bsrsScore(row['簡式健康量表 [4.感覺憂鬱、心情低落]']),
+        bsrsScore(row['簡式健康量表 [5.覺得比不上別人]'])
+      ];
+      const bsrsSum = bs.reduce((a, b) => a + b, 0);
+
+      // 肌骨 (15個部位, 0~3)
+      const mskParts = [
+        { name: '頸', val: extractNumber(row['2.根據部位回答疼痛程度? [頸]']) },
+        { name: '左肩', val: extractNumber(row['2.根據部位回答疼痛程度? [左肩]']) },
+        { name: '右肩', val: extractNumber(row['2.根據部位回答疼痛程度? [右肩]']) },
+        { name: '上背', val: extractNumber(row['2.根據部位回答疼痛程度? [上背]']) },
+        { name: '左手肘', val: extractNumber(row['2.根據部位回答疼痛程度? [左手肘/左前臂]']) },
+        { name: '右手肘', val: extractNumber(row['2.根據部位回答疼痛程度? [右手肘/右前臂]']) },
+        { name: '下背', val: extractNumber(row['2.根據部位回答疼痛程度? [下背]']) },
+        { name: '左手腕', val: extractNumber(row['2.根據部位回答疼痛程度? [左手/左手腕]']) },
+        { name: '右手腕', val: extractNumber(row['2.根據部位回答疼痛程度? [右手/右手腕]']) },
+        { name: '左臀腿', val: extractNumber(row['2.根據部位回答疼痛程度? [左臀/左大腿]']) },
+        { name: '右臀腿', val: extractNumber(row['2.根據部位回答疼痛程度? [右臀/右大腿]']) },
+        { name: '左膝', val: extractNumber(row['2.根據部位回答疼痛程度? [左膝]']) },
+        { name: '右膝', val: extractNumber(row['2.根據部位回答疼痛程度? [右膝]']) },
+        { name: '左腳踝', val: extractNumber(row['2.根據部位回答疼痛程度? [左腳踝/左腳]']) },
+        { name: '右腳踝', val: extractNumber(row['2.根據部位回答疼痛程度? [右腳踝/右腳]']) }
+      ];
+      const mskMax = Math.max(...mskParts.map(p => p.val));
+
+      // 風險計分
+      let riskCount = 0;
+      if (pfAvg >= 50) riskCount++;
+      if (wfAvg >= 50) riskCount++;
+      if (bsrsSum >= 6) riskCount++;
+      if (mskMax >= 2) riskCount++;
+
+      return {
+        ...row,
+        timestamp: row['時間戳記'],
+        name: row['姓名'] || '匿名',
+        dept: row['單位(如人資)'] || '未指定',
+        empId: row['員工編號'] || '-',
+        pf, pfAvg, isPfHigh: pfAvg >= 50,
+        wf, wfAvg, isWfHigh: wfAvg >= 50,
+        bs, bsrsSum, isBsrsHigh: bsrsSum >= 6,
+        mskParts, mskMax,
+        hasMsk: row['您在過去1年內,身體是否有長達2星期以上的痠痛、發麻、刺痛、肌肉疲勞、關節活動限制等不適症狀?'] === '是',
+        mskNeedHelp: row['7.您是否需要公司給予協助?如請醫師或職護諮詢面談關於骨骼肌肉相關議題'] === '是',
+        mskLeave: row['5.近3個月您是否有因上述不適症狀而請假就醫'] === '是',
+        mskDiagnosed: row['6.您是否曾被醫師確診肌肉骨骼或神經系統相關疾病(需要藥物、復健或手術治療)'] === '是',
+        mskWorse: row['4.上圖痠痛或不適症狀，是否經常於工作後才出現或加劇?'] === '是',
+        mskDuration: row['3.上圖中最痠痛或不適之部位，症狀持續長達多久時間?'] || '',
+        ageGroup: row['1.年齡'] || '未填',
+        workload: row['3.工作中是否常覺得體力或心力無法負荷?'] || '',
+        workType: row['2.目前工作是否包含下列作業?(可複選)'] || '',
+        healthAbnormal: row['4.一般健康檢查有異常的(可複選)'] || '',
+        medication: row['5.是否因疾病或受傷，需規律服藥或曾經接受手術治療'] === '是',
+        healthLeave: row['6.最近一年，因上述健康問題而請假的天數'] || '0天',
+        vision: row['職能評估 [視覺功能(有沒有因為視力影響工作)]'] || '',
+        hearing: row['職能評估 [聽覺功能(有沒有因為耳朵聽力影響工作)]'] || '',
+        muscle: row['職能評估 [肌力/關節活動度(有沒有五十肩、板機指、媽媽手、關節炎等肌肉關節問題影響工作)]'] || '',
+        cognitive: row['職能評估 [認知功能(記憶差、理解力不好而影響工作)]'] || '',
+        feedback: row['有沒有要跟護理師或職安說的話?'] || '',
+        riskCount, isHighRisk: riskCount >= 3
+      };
+    };
+
+    // 模擬資料
+    const generateMock = () => {
+      const depts = ['基隆廠', '汐止廠', '土城廠', '八里廠', '中壢廠'];
+      const names = ['王大明', '陳美玲', '林志宏', '張淑芬', '李建國', '劉雅婷', '吳志明', '黃淑惠', '周建華', '蔡美華'];
+      return Array.from({ length: 68 }, (_, i) => {
+        const stressed = Math.random() > 0.65;
+        const s = () => stressed ? [50, 75, 100][Math.floor(Math.random() * 3)] : [0, 25, 50][Math.floor(Math.random() * 3)];
+        const bs = () => stressed ? Math.floor(Math.random() * 3 + 2) : Math.floor(Math.random() * 2);
+        const dept = depts[Math.floor(Math.random() * depts.length)];
+        return processRow({
+          '時間戳記': `2026/05/${String(Math.floor(Math.random() * 20 + 1)).padStart(2,'0')} 10:00:00`,
+          '姓名': `${names[Math.floor(Math.random() * names.length)]}`,
+          '員工編號': `G${1000 + i}`,
+          '單位(如人資)': dept,
+          '個人疲勞問卷6題 [1.你常覺得疲勞嗎?]': `${s()}`,
+          '個人疲勞問卷6題 [2.你常覺得身體上體力透支嗎?]': `${s()}`,
+          '個人疲勞問卷6題 [3.你常覺得情緒上心力交瘁嗎?]': `${s()}`,
+          '個人疲勞問卷6題 [4.你常覺得我快要撐不下去嗎?]': `${s()}`,
+          '個人疲勞問卷6題 [5.你常覺得精疲力竭嗎?]': `${s()}`,
+          '個人疲勞問卷6題 [6.你常常覺得虛弱，好像快要生病了嗎?]': `${s()}`,
+          '工作疲勞問卷7題 [1.你的工作會令人情緒上心力交瘁嗎?]': `${s()}`,
+          '工作疲勞問卷7題 [你的工作會讓你覺得快要累垮了嗎?]': `${s()}`,
+          '工作疲勞問卷7題 [3.你的工作會讓你覺得挫折嗎?]': `${s()}`,
+          '工作疲勞問卷7題 [4.工作一整天之後，你覺得精疲力竭嗎?]': `${s()}`,
+          '工作疲勞問卷7題 [5.上班之前只要想到又要工作一整天，你就覺得沒力嗎?]': `${s()}`,
+          '工作疲勞問卷7題 [6.上班時你會覺得每一刻都很難熬嗎?]': `${s()}`,
+          '工作疲勞問卷7題 [7.不工作的時候，你有足夠的精力陪朋友或家人嗎?(反向題)]': `${100 - s()}`,
+          '您在過去1年內,身體是否有長達2星期以上的痠痛、發麻、刺痛、肌肉疲勞、關節活動限制等不適症狀?': stressed ? '是' : '否',
+          '2.根據部位回答疼痛程度? [頸]': `${Math.floor(Math.random() * 4)}`,
+          '2.根據部位回答疼痛程度? [左肩]': `${Math.floor(Math.random() * 4)}`,
+          '2.根據部位回答疼痛程度? [右肩]': `${Math.floor(Math.random() * 4)}`,
+          '2.根據部位回答疼痛程度? [上背]': `${Math.floor(Math.random() * 4)}`,
+          '2.根據部位回答疼痛程度? [左手肘/左前臂]': `${Math.floor(Math.random() * 2)}`,
+          '2.根據部位回答疼痛程度? [右手肘/右前臂]': `${Math.floor(Math.random() * 2)}`,
+          '2.根據部位回答疼痛程度? [下背]': `${Math.floor(Math.random() * 4)}`,
+          '2.根據部位回答疼痛程度? [左手/左手腕]': `${Math.floor(Math.random() * 3)}`,
+          '2.根據部位回答疼痛程度? [右手/右手腕]': `${Math.floor(Math.random() * 3)}`,
+          '2.根據部位回答疼痛程度? [左臀/左大腿]': `${Math.floor(Math.random() * 2)}`,
+          '2.根據部位回答疼痛程度? [右臀/右大腿]': `${Math.floor(Math.random() * 2)}`,
+          '2.根據部位回答疼痛程度? [左膝]': `${Math.floor(Math.random() * 3)}`,
+          '2.根據部位回答疼痛程度? [右膝]': `${Math.floor(Math.random() * 3)}`,
+          '2.根據部位回答疼痛程度? [左腳踝/左腳]': `${Math.floor(Math.random() * 2)}`,
+          '2.根據部位回答疼痛程度? [右腳踝/右腳]': `${Math.floor(Math.random() * 2)}`,
+          '3.上圖中最痠痛或不適之部位，症狀持續長達多久時間?': ['1個月內', '1-3個月', '3-6個月', '半年以上'][Math.floor(Math.random() * 4)],
+          '4.上圖痠痛或不適症狀，是否經常於工作後才出現或加劇?': Math.random() > 0.5 ? '是' : '否',
+          '5.近3個月您是否有因上述不適症狀而請假就醫': stressed && Math.random() > 0.5 ? '是' : '否',
+          '6.您是否曾被醫師確診肌肉骨骼或神經系統相關疾病(需要藥物、復健或手術治療)': Math.random() > 0.8 ? '是' : '否',
+          '7.您是否需要公司給予協助?如請醫師或職護諮詢面談關於骨骼肌肉相關議題': stressed ? '是' : '否',
+          '1.年齡': ['45歲以下', '45歲-64歲', '65歲以上'][Math.floor(Math.random() * 3)],
+          '2.目前工作是否包含下列作業?(可複選)': ['一般正常班', '輪班/夜班', '重體力勞動', '駕駛/操作設備', '高處作業'][Math.floor(Math.random() * 5)],
+          '3.工作中是否常覺得體力或心力無法負荷?': ['經常', '有時候', '很少幾乎沒有'][Math.floor(Math.random() * 3)],
+          '4.一般健康檢查有異常的(可複選)': ['無', '血壓異常', '血糖異常', '血脂異常', '肝功能異常', '腎功能異常'][Math.floor(Math.random() * 6)],
+          '5.是否因疾病或受傷，需規律服藥或曾經接受手術治療': Math.random() > 0.7 ? '是' : '否',
+          '6.最近一年，因上述健康問題而請假的天數': ['0天', '1-3天', '4-7天', '8天以上'][Math.floor(Math.random() * 4)],
+          '職能評估 [視覺功能(有沒有因為視力影響工作)]': Math.random() > 0.85 ? '輕度異常不影響工作' : '正常',
+          '職能評估 [聽覺功能(有沒有因為耳朵聽力影響工作)]': Math.random() > 0.88 ? '輕度異常不影響工作' : '正常',
+          '職能評估 [肌力/關節活動度(有沒有五十肩、板機指、媽媽手、關節炎等肌肉關節問題影響工作)]': Math.random() > 0.82 ? '輕度異常不影響工作' : '正常',
+          '職能評估 [認知功能(記憶差、理解力不好而影響工作)]': Math.random() > 0.92 ? '輕度異常不影響工作' : '正常',
+          '簡式健康量表 [1.睡眠困難，譬如難以入睡、易醒或早醒]': `${bs()}`,
+          '簡式健康量表 [2.感覺緊張不安]': `${bs()}`,
+          '簡式健康量表 [3.覺得容易苦惱或動怒]': `${bs()}`,
+          '簡式健康量表 [4.感覺憂鬱、心情低落]': `${bs()}`,
+          '簡式健康量表 [5.覺得比不上別人]': `${bs()}`,
+          '有沒有要跟護理師或職安說的話?': stressed && Math.random() > 0.6 ? ['希望能調整工作量', '最近壓力較大', '腰痛需要協助'][Math.floor(Math.random() * 3)] : ''
+        });
+      });
+    };
+
+    // ── UI 基礎元件 ──
+    const SectionCard = ({ title, icon, children, borderColor = 'border-slate-200' }) => (
+      <div className={`section-card border-t-4 ${borderColor}`}>
+        <div className="flex items-center gap-3 mb-5 pb-3 border-b border-slate-100">
+          <i className={`fa-solid ${icon} text-lg text-slate-500`}></i>
+          <h2 className="text-base font-bold text-slate-800">{title}</h2>
+        </div>
+        {children}
+      </div>
+    );
+
+    const KPI = ({ label, value, sub, icon, bg = 'bg-blue-50', fg = 'text-blue-600' }) => (
+      <div className="kpi-card">
+        <div className={`w-12 h-12 rounded-full ${bg} ${fg} flex items-center justify-center flex-shrink-0`}>
+          <i className={`fa-solid ${icon} text-xl`}></i>
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs text-slate-500 font-medium mb-0.5 truncate">{label}</p>
+          <p className="text-2xl font-black text-slate-800 leading-none">{value}</p>
+          {sub && <p className="text-xs text-slate-400 mt-1">{sub}</p>}
+        </div>
+      </div>
+    );
+
+    const SmallTable = ({ cols, rows, rowKey = 'idx', maxH = 'max-h-56' }) => (
+      <div className={`overflow-auto ${maxH} rounded-lg border border-slate-200 no-scrollbar`}>
+        <table className="w-full text-xs text-left">
+          <thead className="bg-slate-100 sticky top-0 z-10">
+            <tr>{cols.map((c, i) => <th key={i} className="px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">{c.h}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.length === 0
+              ? <tr><td colSpan={cols.length} className="px-3 py-6 text-center text-slate-400">無資料</td></tr>
+              : rows.map((r, i) => (
+                <tr key={i} className="border-b border-slate-100 hover:bg-slate-50">
+                  {cols.map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap">{c.r ? c.r(r) : r[c.k]}</td>)}
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+    );
+
+    const ProgressBar = ({ label, value, max, color = 'bg-blue-500' }) => {
+      const pct = max > 0 ? Math.round((value / max) * 100) : 0;
+      return (
+        <div className="mb-2">
+          <div className="flex justify-between text-xs text-slate-600 mb-1">
+            <span className="font-medium">{label}</span>
+            <span>{value} 人 ({pct}%)</span>
+          </div>
+          <div className="progress-bar">
+            <div className={`progress-fill ${color}`} style={{ width: `${pct}%` }}></div>
+          </div>
+        </div>
+      );
+    };
+
+    // 人體熱圖元件
+    const BodyHeatmap = ({ avg }) => {
+      const getStyle = (v) => {
+        const n = parseFloat(v) || 0;
+        if (n < 0.3) return 'bg-slate-100 text-slate-400 border-slate-200';
+        if (n < 0.8) return 'bg-yellow-100 text-yellow-700 border-yellow-300';
+        if (n < 1.5) return 'bg-orange-200 text-orange-800 border-orange-400';
+        return 'bg-red-500 text-white border-red-600 font-bold';
+      };
+      const P = ({ k, label }) => (
+        <div className={`heat-cell ${getStyle(avg[k])}`}>
+          <div>{label || k}</div>
+          <div className="text-xs opacity-75">{(parseFloat(avg[k]) || 0).toFixed(2)}</div>
+        </div>
+      );
+      return (
+        <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+          <p className="text-xs font-semibold text-slate-500 mb-3 text-center">平均疼痛指數 (0=無 / 1=微痛 / 2=中等 / 3=嚴重)</p>
+          <div className="grid grid-cols-3 gap-1.5 max-w-xs mx-auto">
+            <div className="col-span-3 flex justify-center"><P k="頸" label="頸部" /></div>
+            <P k="左肩" /><P k="上背" /><P k="右肩" />
+            <P k="左手肘" /><P k="下背" /><P k="右手肘" />
+            <P k="左手腕" /><div></div><P k="右手腕" />
+            <P k="左臀腿" /><div></div><P k="右臀腿" />
+            <P k="左膝" /><div></div><P k="右膝" />
+            <P k="左腳踝" /><div></div><P k="右腳踝" />
+          </div>
+          <div className="flex gap-2 mt-3 justify-center text-xs">
+            <span className="heat-cell bg-slate-100 text-slate-400 border-slate-200">無症狀</span>
+            <span className="heat-cell bg-yellow-100 text-yellow-700 border-yellow-300">微痛</span>
+            <span className="heat-cell bg-orange-200 text-orange-800 border-orange-400">中等</span>
+            <span className="heat-cell bg-red-500 text-white border-red-600">嚴重</span>
+          </div>
+        </div>
+      );
+    };
+
+    // ── 主 App ──
+    function App() {
+      const [data, setData] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [srcLabel, setSrcLabel] = useState('');
+      const [lastUpdate, setLastUpdate] = useState('');
+
+      const loadData = async () => {
+        try {
+          const res = await fetch(`${CSV_URL}&_t=${Date.now()}`);
+          if (!res.ok) throw new Error('fetch failed');
+          const text = await res.text();
+          const result = Papa.parse(text, { header: true, skipEmptyLines: true });
+          const rows = result.data.map(processRow).filter(r => r.timestamp);
+          if (rows.length > 0) {
+            setData(rows);
+            setSrcLabel('Google Sheets 雲端同步');
+          } else throw new Error('empty');
+        } catch {
+          setData(generateMock());
+          setSrcLabel('模擬資料（網路受限）');
+        }
+        setLastUpdate(new Date().toLocaleString('zh-TW'));
+        setLoading(false);
+      };
+
+      useEffect(() => {
+        loadData();
+        const timer = setInterval(loadData, REFRESH_INTERVAL);
+        return () => clearInterval(timer);
+      }, []);
+
+      const agg = useMemo(() => {
+        if (!data.length) return null;
+        const n = data.length;
+
+        // 日期範圍
+        const dates = data.map(d => new Date(d.timestamp)).filter(d => !isNaN(d)).sort((a,b)=>a-b);
+        const dateRange = dates.length >= 2
+          ? `${dates[0].toLocaleDateString('zh-TW')} ~ ${dates[dates.length-1].toLocaleDateString('zh-TW')}`
+          : dates.length === 1 ? dates[0].toLocaleDateString('zh-TW') : '無日期';
+
+        // ── 第零區 ──
+        const deptCounts = {};
+        data.forEach(d => { deptCounts[d.dept] = (deptCounts[d.dept] || 0) + 1; });
+        const deptList = Object.entries(deptCounts).map(([name, count]) => ({ name, count })).sort((a,b)=>b.count-a.count);
+
+        // ── 第一區：個人疲勞 ──
+        const pfAvgAll = Math.round(data.reduce((s,d)=>s+d.pfAvg, 0)/n);
+        const pfHigh = data.filter(d=>d.isPfHigh).length;
+        const pfLevels = [
+          { name: '低 (<25)', v: data.filter(d=>d.pfAvg<25).length },
+          { name: '中 (25-49)', v: data.filter(d=>d.pfAvg>=25&&d.pfAvg<50).length },
+          { name: '高 (≥50)', v: data.filter(d=>d.pfAvg>=50).length }
+        ];
+        const pfRadar = [
+          '常覺疲勞','體力透支','心力交瘁','撐不下去','精疲力竭','虛弱生病'
+        ].map((s,i) => ({ s, v: Math.round(data.reduce((a,d)=>a+d.pf[i],0)/n) }));
+
+        // ── 第二區：工作疲勞 ──
+        const wfAvgAll = Math.round(data.reduce((s,d)=>s+d.wfAvg, 0)/n);
+        const wfHigh = data.filter(d=>d.isWfHigh).length;
+        const wfLevels = [
+          { name: '低 (<25)', v: data.filter(d=>d.wfAvg<25).length },
+          { name: '中 (25-49)', v: data.filter(d=>d.wfAvg>=25&&d.wfAvg<50).length },
+          { name: '高 (≥50)', v: data.filter(d=>d.wfAvg>=50).length }
+        ];
+        const wfBars = [
+          '情緒交瘁','快要累垮','覺得挫折','精疲力竭','沒力上班','每刻難熬','反向:無精力'
+        ].map((s,i) => ({ s, v: Math.round(data.reduce((a,d)=>a+d.wf[i],0)/n) }));
+        const scatter = data.map(d=>({ x: Math.round(d.pfAvg), y: Math.round(d.wfAvg), name: d.name }));
+
+        // ── 第三區：肌骨 ──
+        const mskHas = data.filter(d=>d.hasMsk).length;
+        const mskPie = [{ name:'有症狀', v:mskHas }, { name:'無症狀', v:n-mskHas }];
+        const mskAvg = {};
+        data.forEach(d => d.mskParts.forEach(p => { mskAvg[p.name] = (mskAvg[p.name]||0) + p.val; }));
+        Object.keys(mskAvg).forEach(k => mskAvg[k] = (mskAvg[k]/n).toFixed(2));
+        const mskDuration = {};
+        data.forEach(d => { if(d.mskDuration) mskDuration[d.mskDuration] = (mskDuration[d.mskDuration]||0)+1; });
+        const mskDurData = Object.entries(mskDuration).map(([k,v])=>({ name:k, v }));
+        const mskStacked = ['頸','左肩','右肩','上背','下背','左手腕','右手腕','左膝','右膝'].map(k => ({
+          name: k,
+          '0-不痛': data.filter(d=>d.mskParts.find(p=>p.name===k)?.val===0).length,
+          '1-微痛': data.filter(d=>d.mskParts.find(p=>p.name===k)?.val===1).length,
+          '2-中等': data.filter(d=>d.mskParts.find(p=>p.name===k)?.val===2).length,
+          '3-嚴重': data.filter(d=>d.mskParts.find(p=>p.name===k)?.val===3).length,
+        }));
+        const mskLeave = data.filter(d=>d.mskLeave).length;
+        const mskDiag = data.filter(d=>d.mskDiagnosed).length;
+        const mskHelp = data.filter(d=>d.mskNeedHelp).length;
+        const mskWorse = data.filter(d=>d.mskWorse).length;
+
+        // ── 第四區：中高齡 ──
+        const agePie = [
+          { name:'45歲以下', v: data.filter(d=>d.ageGroup==='45歲以下').length, fill:'#94a3b8' },
+          { name:'45-64歲', v: data.filter(d=>d.ageGroup==='45歲-64歲').length, fill:'#3b82f6' },
+          { name:'65歲以上', v: data.filter(d=>d.ageGroup==='65歲以上').length, fill:'#1d4ed8' },
+        ];
+        const workTypeCount = {};
+        data.forEach(d => { if(d.workType) d.workType.split(',').map(s=>s.trim()).forEach(t => { if(t) workTypeCount[t]=(workTypeCount[t]||0)+1; }); });
+        const workTypeData = Object.entries(workTypeCount).map(([k,v])=>({ name:k, v })).sort((a,b)=>b.v-a.v).slice(0,7);
+        const workloadData = {};
+        data.forEach(d => { if(d.workload) workloadData[d.workload]=(workloadData[d.workload]||0)+1; });
+        const workloadArr = Object.entries(workloadData).map(([k,v])=>({ name:k, v })).sort((a,b)=>b.v-a.v);
+        const healthAbnCount = {};
+        data.forEach(d => { if(d.healthAbnormal && d.healthAbnormal !== '無') { d.healthAbnormal.split(',').map(s=>s.trim()).forEach(t=>{ if(t&&t!=='無') healthAbnCount[t]=(healthAbnCount[t]||0)+1; }); }});
+        const healthAbnData = Object.entries(healthAbnCount).map(([k,v])=>({ name:k, v })).sort((a,b)=>b.v-a.v).slice(0,5);
+        const visionAbn = data.filter(d=>d.vision && !d.vision.includes('正常')).length;
+        const hearingAbn = data.filter(d=>d.hearing && !d.hearing.includes('正常')).length;
+        const muscleAbn = data.filter(d=>d.muscle && !d.muscle.includes('正常')).length;
+        const cogAbn = data.filter(d=>d.cognitive && !d.cognitive.includes('正常')).length;
+        const medCount = data.filter(d=>d.medication).length;
+        const leaveCount2 = data.filter(d=>d.healthLeave && d.healthLeave !== '0天').length;
+
+        // ── 第五區：BSRS ──
+        const bsrsAvgAll = (data.reduce((s,d)=>s+d.bsrsSum,0)/n).toFixed(1);
+        const bsrsHigh = data.filter(d=>d.isBsrsHigh).length;
+        const bsrsLevels = [
+          { name:'正常(0-5)', v: data.filter(d=>d.bsrsSum<=5).length },
+          { name:'輕度(6-9)', v: data.filter(d=>d.bsrsSum>=6&&d.bsrsSum<=9).length },
+          { name:'中度(10-14)', v: data.filter(d=>d.bsrsSum>=10&&d.bsrsSum<=14).length },
+          { name:'重度(≥15)', v: data.filter(d=>d.bsrsSum>=15).length }
+        ];
+        const bsrsRadar = ['睡眠困難','緊張不安','苦惱動怒','憂鬱低落','比不上人'].map((s,i)=>({
+          s, v: Number((data.reduce((a,d)=>a+d.bs[i],0)/n).toFixed(2))
+        }));
+
+        // ── 第六區：單位交叉 ──
+        const deptMap = {};
+        data.forEach(d => {
+          if(!deptMap[d.dept]) deptMap[d.dept] = { name:d.dept, cnt:0, pfSum:0, wfSum:0, bsrsSum:0, high:0, mskHigh:0 };
+          const dm = deptMap[d.dept];
+          dm.cnt++; dm.pfSum+=d.pfAvg; dm.wfSum+=d.wfAvg; dm.bsrsSum+=d.bsrsSum;
+          if(d.riskCount>=2) dm.high++;
+          if(d.mskMax>=2) dm.mskHigh++;
+        });
+        const deptArr = Object.values(deptMap).map(d=>({
+          name: d.name, count: d.cnt,
+          pfAvg: Math.round(d.pfSum/d.cnt),
+          wfAvg: Math.round(d.wfSum/d.cnt),
+          bsrsAvg: (d.bsrsSum/d.cnt).toFixed(1),
+          high: d.high, mskRate: Math.round((d.mskHigh/d.cnt)*100)
+        })).sort((a,b)=>b.high-a.high);
+
+        return {
+          n, dateRange, deptList,
+          pfAvgAll, pfHigh, pfLevels, pfRadar,
+          wfAvgAll, wfHigh, wfLevels, wfBars, scatter,
+          mskHas, mskPie, mskAvg, mskDurData, mskStacked, mskLeave, mskDiag, mskHelp, mskWorse,
+          agePie, workTypeData, workloadArr, healthAbnData, visionAbn, hearingAbn, muscleAbn, cogAbn, medCount, leaveCount2,
+          bsrsAvgAll, bsrsHigh, bsrsLevels, bsrsRadar,
+          deptArr
+        };
+      }, [data]);
+
+      if (loading) return null;
+      const a = agg;
+
+      const riskBadge = (n) => {
+        if (n === 0) return <span className="risk-badge bg-green-100 text-green-700">正常</span>;
+        if (n === 1) return <span className="risk-badge bg-yellow-100 text-yellow-700">{n}項預警</span>;
+        if (n === 2) return <span className="risk-badge bg-orange-100 text-orange-700">{n}項預警</span>;
+        return <span className="risk-badge bg-red-100 text-red-700 animate-pulse">{n}項高危</span>;
+      };
+
+      return (
+        <div className="min-h-screen p-4 md:p-6 max-w-screen-2xl mx-auto">
+
+          {/* ── Header ── */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-3">
+            <div>
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center">
+                  <i className="fa-solid fa-shield-halved text-white text-lg"></i>
+                </div>
+                <div>
+                  <h1 className="text-2xl font-black text-slate-900 tracking-tight">國產建材 職場健康安全儀表板</h1>
+                  <p className="text-xs text-slate-500">2026年度職安問卷分析 ｜ {srcLabel}</p>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button onClick={loadData} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors font-medium">
+                <i className="fa-solid fa-rotate-right"></i> 立即更新
+              </button>
+              <div className="bg-white px-4 py-2 rounded-lg border border-slate-200 text-xs text-slate-500">
+                <i className="fa-regular fa-clock mr-1.5"></i>更新：{lastUpdate}
+              </div>
+            </div>
+          </div>
+
+          {/* ── 第七區：高風險追蹤（置頂） ── */}
+          <div className="bg-red-50 border border-red-200 rounded-2xl p-5 mb-6">
+            <h2 className="text-base font-bold text-red-700 flex items-center gap-2 mb-4">
+              <i className="fa-solid fa-triangle-exclamation"></i>
+              ⚠️ 第七區：優先關懷追蹤名單
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <p className="text-xs font-bold text-red-800 mb-2">🔴 綜合高風險 (≥3項超標)</p>
+                <SmallTable
+                  cols={[
+                    { h:'單位', k:'dept' },
+                    { h:'姓名', k:'name' },
+                    { h:'風險', r: r => riskBadge(r.riskCount) }
+                  ]}
+                  rows={data.filter(d=>d.isHighRisk).sort((a,b)=>b.riskCount-a.riskCount)}
+                  maxH="max-h-44"
+                />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-orange-800 mb-2">🟠 肌骨需職護面談</p>
+                <SmallTable
+                  cols={[
+                    { h:'單位', k:'dept' },
+                    { h:'姓名', k:'name' },
+                    { h:'狀況', r: r => <span className="risk-badge bg-orange-100 text-orange-700">需面談</span> }
+                  ]}
+                  rows={data.filter(d=>d.mskNeedHelp)}
+                  maxH="max-h-44"
+                />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-purple-800 mb-2">🟣 心理健康紅燈 (BSRS≥6)</p>
+                <SmallTable
+                  cols={[
+                    { h:'單位', k:'dept' },
+                    { h:'姓名', k:'name' },
+                    { h:'分數', r: r => <span className="risk-badge bg-purple-100 text-purple-700">{r.bsrsSum}分</span> }
+                  ]}
+                  rows={data.filter(d=>d.isBsrsHigh).sort((a,b)=>b.bsrsSum-a.bsrsSum)}
+                  maxH="max-h-44"
+                />
+              </div>
+            </div>
+            {/* 中高齡異常名單 */}
+            <div className="mt-4 pt-4 border-t border-red-200">
+              <p className="text-xs font-bold text-blue-800 mb-2">🔵 中高齡體能負荷異常 (45歲以上 + 體力常無法負荷)</p>
+              <SmallTable
+                cols={[
+                  { h:'單位', k:'dept' }, { h:'姓名', k:'name' },
+                  { h:'年齡', k:'ageGroup' },
+                  { h:'負荷感受', k:'workload' },
+                  { h:'風險', r: r => riskBadge(r.riskCount) }
+                ]}
+                rows={data.filter(d => d.ageGroup !== '45歲以下' && d.workload.includes('經常'))}
+                maxH="max-h-32"
+              />
+            </div>
+          </div>
+
+          {/* ── 第零區：總覽KPI ── */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+            <KPI label="問卷總回收" value={a.n} sub={a.dateRange} icon="fa-file-signature" bg="bg-sky-50" fg="text-sky-600" />
+            <KPI label="中高風險人數" value={data.filter(d=>d.riskCount>0).length} sub={`佔${Math.round(data.filter(d=>d.riskCount>0).length/a.n*100)}%`} icon="fa-circle-exclamation" bg="bg-red-50" fg="text-red-600" />
+            <KPI label="個人疲勞均分" value={a.pfAvgAll} sub="≥50為高風險" icon="fa-user-injured" bg="bg-orange-50" fg="text-orange-600" />
+            <KPI label="BSRS心理紅燈" value={a.bsrsHigh} sub="需優先關懷" icon="fa-brain" bg="bg-purple-50" fg="text-purple-600" />
+            <KPI label="肌骨就醫人數" value={a.mskLeave} sub="近3月請假就醫" icon="fa-stethoscope" bg="bg-teal-50" fg="text-teal-600" />
+            <KPI label="需公司協助" value={a.mskHelp} sub="職護面談申請" icon="fa-hands-helping" bg="bg-pink-50" fg="text-pink-600" />
+          </div>
+
+          {/* 各單位回收數 */}
+          <div className="section-card mb-6">
+            <div className="flex items-center gap-2 mb-4">
+              <i className="fa-solid fa-building text-slate-500"></i>
+              <h3 className="text-sm font-bold text-slate-700">各單位問卷回收數</h3>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+              {a.deptList.map((d,i) => (
+                <div key={i} className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                  <p className="text-xs text-slate-500 truncate">{d.name}</p>
+                  <p className="text-2xl font-black text-slate-800">{d.count}</p>
+                  <div className="progress-bar mt-1">
+                    <div className="progress-fill bg-blue-500" style={{ width:`${Math.round(d.count/a.n*100)}%` }}></div>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">{Math.round(d.count/a.n*100)}%</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ── 雙欄主體 ── */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+
+            {/* 第一區：個人疲勞 */}
+            <SectionCard title="第一區：個人疲勞分析" icon="fa-user-injured" borderColor="border-orange-400">
+              <div className="grid grid-cols-3 gap-3 mb-5">
+                <div className="bg-orange-50 rounded-xl p-3 text-center border border-orange-100 col-span-1">
+                  <p className="text-xs text-orange-600 font-medium">平均分數</p>
+                  <p className={`text-4xl font-black mt-1 ${a.pfAvgAll>=50?'text-red-500':'text-slate-800'}`}>{a.pfAvgAll}</p>
+                  <p className="text-xs text-orange-400 mt-1">滿分100</p>
+                </div>
+                <div className="col-span-2">
+                  {/* 高風險比例進度條 (補缺漏1) */}
+                  <p className="text-xs font-semibold text-slate-600 mb-2">風險分佈</p>
+                  {a.pfLevels.map((lv,i)=>(
+                    <ProgressBar key={i} label={lv.name} value={lv.v} max={a.n}
+                      color={['bg-green-500','bg-yellow-500','bg-red-500'][i]} />
+                  ))}
+                </div>
+              </div>
+              <div className="h-56 mb-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <RadarChart cx="50%" cy="50%" outerRadius="70%" data={a.pfRadar}>
+                    <PolarGrid />
+                    <PolarAngleAxis dataKey="s" tick={{fontSize:11}} />
+                    <PolarRadiusAxis angle={30} domain={[0,100]} tick={{fontSize:10}} />
+                    <Radar name="個人疲勞各題均分" dataKey="v" stroke={C.orange} fill={C.orange} fillOpacity={0.45} />
+                    <RTooltip />
+                    <Legend />
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="text-xs font-semibold text-slate-600 mb-2">高疲勞人員清單 (pfAvg≥50)</p>
+              <SmallTable
+                cols={[
+                  { h:'單位', k:'dept' }, { h:'姓名', k:'name' },
+                  { h:'分數', r:r=><span className="font-bold text-red-500">{Math.round(r.pfAvg)}</span> },
+                  { h:'風險', r:r=>riskBadge(r.riskCount) }
+                ]}
+                rows={data.filter(d=>d.isPfHigh).sort((a,b)=>b.pfAvg-a.pfAvg)}
+              />
+            </SectionCard>
+
+            {/* 第二區：工作疲勞 */}
+            <SectionCard title="第二區：工作疲勞分析" icon="fa-briefcase" borderColor="border-yellow-400">
+              <div className="grid grid-cols-3 gap-3 mb-4">
+                <div className="bg-yellow-50 rounded-xl p-3 text-center border border-yellow-100">
+                  <p className="text-xs text-yellow-700 font-medium">平均分數</p>
+                  <p className={`text-4xl font-black mt-1 ${a.wfAvgAll>=50?'text-red-500':'text-slate-800'}`}>{a.wfAvgAll}</p>
+                  <p className="text-xs text-yellow-400 mt-1">反向題已含</p>
+                </div>
+                <div className="col-span-2">
+                  {a.wfLevels.map((lv,i)=>(
+                    <ProgressBar key={i} label={lv.name} value={lv.v} max={a.n}
+                      color={['bg-green-500','bg-yellow-500','bg-red-500'][i]} />
+                  ))}
+                </div>
+              </div>
+              {/* 工作疲勞各題均分橫條圖 (補缺漏2) */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">各題平均分數 (0~100)</p>
+              <div className="h-52 mb-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={a.wfBars} layout="vertical" margin={{ top:0, right:30, left:60, bottom:0 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                    <XAxis type="number" domain={[0,100]} tick={{fontSize:10}} />
+                    <YAxis dataKey="s" type="category" width={58} tick={{fontSize:10}} />
+                    <RTooltip />
+                    <Bar dataKey="v" fill={C.yellow} radius={[0,4,4,0]}>
+                      <LabelList dataKey="v" position="right" style={{fontSize:10}} />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              {/* 個人 vs 工作散佈圖 */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">個人疲勞 vs 工作疲勞 散佈圖</p>
+              <div className="h-52 mb-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ScatterChart margin={{top:5,right:5,bottom:5,left:-10}}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis type="number" dataKey="x" name="個人疲勞" domain={[0,100]} tick={{fontSize:10}} />
+                    <YAxis type="number" dataKey="y" name="工作疲勞" domain={[0,100]} tick={{fontSize:10}} />
+                    <ZAxis type="category" dataKey="name" name="姓名" />
+                    <RTooltip cursor={{ strokeDasharray: '3 3' }} />
+                    <Scatter data={a.scatter} fill={C.blue} fillOpacity={0.6} />
+                  </ScatterChart>
+                </ResponsiveContainer>
+              </div>
+              {/* 工作疲勞高風險清單 (補缺漏3) */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">工作疲勞高風險人員 (≥50分)</p>
+              <SmallTable
+                cols={[
+                  { h:'單位', k:'dept' }, { h:'姓名', k:'name' },
+                  { h:'工作疲勞', r:r=><span className="font-bold text-yellow-600">{Math.round(r.wfAvg)}</span> },
+                  { h:'個人疲勞', r:r=><span className="font-bold text-orange-600">{Math.round(r.pfAvg)}</span> }
+                ]}
+                rows={data.filter(d=>d.isWfHigh).sort((a,b)=>b.wfAvg-a.wfAvg)}
+                maxH="max-h-40"
+              />
+            </SectionCard>
+
+            {/* 第三區：肌骨症狀 */}
+            <SectionCard title="第三區：肌肉骨骼症狀調查" icon="fa-person-walking-with-cane" borderColor="border-teal-400">
+              <div className="grid grid-cols-4 gap-2 mb-4">
+                <div className="bg-teal-50 rounded-lg p-3 text-center border border-teal-100">
+                  <p className="text-2xl font-black text-teal-700">{a.mskHas}</p>
+                  <p className="text-xs text-teal-600 mt-0.5">有症狀</p>
+                </div>
+                <div className="bg-orange-50 rounded-lg p-3 text-center border border-orange-100">
+                  <p className="text-2xl font-black text-orange-600">{a.mskWorse}</p>
+                  <p className="text-xs text-orange-600 mt-0.5">工作後加劇</p>
+                </div>
+                <div className="bg-red-50 rounded-lg p-3 text-center border border-red-100">
+                  <p className="text-2xl font-black text-red-600">{a.mskDiag}</p>
+                  <p className="text-xs text-red-600 mt-0.5">已確診</p>
+                </div>
+                <div className="bg-pink-50 rounded-lg p-3 text-center border border-pink-100">
+                  <p className="text-2xl font-black text-pink-600">{a.mskHelp}</p>
+                  <p className="text-xs text-pink-600 mt-0.5">需協助</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                {/* 圓餅 */}
+                <div>
+                  <p className="text-xs font-semibold text-slate-600 mb-1 text-center">過去1年症狀比例</p>
+                  <div className="h-40">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={a.mskPie} dataKey="v" cx="50%" cy="50%" outerRadius={55}>
+                          <Cell fill={C.warning} /><Cell fill={C.green} />
+                        </Pie>
+                        <RTooltip />
+                        <Legend wrapperStyle={{fontSize:11}} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                {/* 持續時間 (補缺漏4) */}
+                <div>
+                  <p className="text-xs font-semibold text-slate-600 mb-1 text-center">症狀持續時間分佈</p>
+                  <div className="h-40">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={a.mskDurData} margin={{top:0,right:5,left:-25,bottom:20}}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="name" tick={{fontSize:9}} angle={-15} textAnchor="end" />
+                        <YAxis tick={{fontSize:9}} />
+                        <RTooltip />
+                        <Bar dataKey="v" fill={C.teal} radius={[3,3,0,0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
+
+              {/* 各部位堆疊橫條圖 (補缺漏5) */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">各部位疼痛程度分佈（堆疊）</p>
+              <div className="h-56 mb-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={a.mskStacked} layout="vertical" margin={{top:0,right:10,left:40,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                    <XAxis type="number" tick={{fontSize:10}} />
+                    <YAxis dataKey="name" type="category" width={38} tick={{fontSize:10}} />
+                    <RTooltip />
+                    <Legend wrapperStyle={{fontSize:10}} />
+                    <Bar dataKey="0-不痛" stackId="a" fill="#e2e8f0" />
+                    <Bar dataKey="1-微痛" stackId="a" fill={C.yellow} />
+                    <Bar dataKey="2-中等" stackId="a" fill={C.orange} />
+                    <Bar dataKey="3-嚴重" stackId="a" fill={C.red} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* 人體熱圖 */}
+              <BodyHeatmap avg={a.mskAvg} />
+            </SectionCard>
+
+            {/* 第四區：中高齡工作適能 */}
+            <SectionCard title="第四區：中高齡工作適能評估" icon="fa-user-shield" borderColor="border-blue-400">
+              {/* 年齡分佈 */}
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                  <p className="text-xs font-semibold text-slate-600 mb-1 text-center">年齡分佈</p>
+                  <div className="h-40">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={a.agePie} dataKey="v" cx="50%" cy="50%" outerRadius={55}>
+                          {a.agePie.map((e,i)=><Cell key={i} fill={e.fill} />)}
+                        </Pie>
+                        <RTooltip />
+                        <Legend wrapperStyle={{fontSize:10}} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                {/* 體力心力負荷感受 (補缺漏7) */}
+                <div>
+                  <p className="text-xs font-semibold text-slate-600 mb-1 text-center">體力/心力負荷感受</p>
+                  <div className="h-40">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={a.workloadArr} margin={{top:0,right:5,left:-20,bottom:20}}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false}/>
+                        <XAxis dataKey="name" tick={{fontSize:9}} angle={-15} textAnchor="end" />
+                        <YAxis tick={{fontSize:9}} />
+                        <RTooltip />
+                        <Bar dataKey="v" radius={[3,3,0,0]}>
+                          {a.workloadArr.map((_,i)=><Cell key={i} fill={[C.red,C.yellow,C.green][i%3]} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
+
+              {/* 高風險作業類型 (補缺漏6) */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">高風險作業類型分佈</p>
+              <div className="h-44 mb-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={a.workTypeData} layout="vertical" margin={{top:0,right:30,left:65,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                    <XAxis type="number" tick={{fontSize:10}} />
+                    <YAxis dataKey="name" type="category" width={63} tick={{fontSize:10}} />
+                    <RTooltip />
+                    <Bar dataKey="v" fill={C.blue} radius={[0,4,4,0]}>
+                      <LabelList dataKey="v" position="right" style={{fontSize:10}} />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* 健康檢查異常TOP5 (補缺漏8) */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">健康檢查異常項目 TOP5</p>
+              <div className="h-40 mb-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={a.healthAbnData} layout="vertical" margin={{top:0,right:30,left:60,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                    <XAxis type="number" tick={{fontSize:10}} />
+                    <YAxis dataKey="name" type="category" width={58} tick={{fontSize:10}} />
+                    <RTooltip />
+                    <Bar dataKey="v" fill={C.orange} radius={[0,4,4,0]}>
+                      <LabelList dataKey="v" position="right" style={{fontSize:10}} />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* 職能評估4項比率卡 (補缺漏9) */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">職能評估異常比率</p>
+              <div className="grid grid-cols-2 gap-2 mb-4">
+                {[
+                  { label:'👁 視覺功能', v:a.visionAbn, color:'bg-blue-50 border-blue-200', fg:'text-blue-700' },
+                  { label:'👂 聽覺功能', v:a.hearingAbn, color:'bg-sky-50 border-sky-200', fg:'text-sky-700' },
+                  { label:'💪 肌力/關節', v:a.muscleAbn, color:'bg-orange-50 border-orange-200', fg:'text-orange-700' },
+                  { label:'🧠 認知功能', v:a.cogAbn, color:'bg-purple-50 border-purple-200', fg:'text-purple-700' }
+                ].map((item,i)=>(
+                  <div key={i} className={`rounded-lg p-3 border ${item.color}`}>
+                    <p className="text-xs text-slate-500 mb-1">{item.label}</p>
+                    <div className="flex items-baseline gap-1">
+                      <p className={`text-xl font-black ${item.fg}`}>{item.v}</p>
+                      <p className="text-xs text-slate-400">人 ({a.n>0?Math.round(item.v/a.n*100):0}%)</p>
+                    </div>
+                    <div className="progress-bar mt-1.5">
+                      <div className={`progress-fill ${['bg-blue-400','bg-sky-400','bg-orange-400','bg-purple-400'][i]}`}
+                        style={{width:`${a.n>0?Math.round(item.v/a.n*100):0}%`}}></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                  <p className="text-2xl font-black text-slate-700">{a.medCount}</p>
+                  <p className="text-xs text-slate-500 mt-0.5">規律用藥/手術治療</p>
+                </div>
+                <div className="bg-slate-50 rounded-lg p-3 text-center border border-slate-200">
+                  <p className="text-2xl font-black text-slate-700">{a.leaveCount2}</p>
+                  <p className="text-xs text-slate-500 mt-0.5">因健康問題請假</p>
+                </div>
+              </div>
+            </SectionCard>
+
+            {/* 第五區：BSRS心理健康 */}
+            <SectionCard title="第五區：心理健康 (BSRS-5)" icon="fa-brain" borderColor="border-purple-400">
+              <div className="grid grid-cols-3 gap-3 mb-5">
+                <div className="bg-purple-50 rounded-xl p-3 text-center border border-purple-100">
+                  <p className="text-xs text-purple-600 font-medium">平均分數</p>
+                  <p className="text-4xl font-black text-purple-700 mt-1">{a.bsrsAvgAll}</p>
+                  <p className="text-xs text-purple-400 mt-1">滿分20分</p>
+                </div>
+                <div className="col-span-2">
+                  {a.bsrsLevels.map((lv,i)=>(
+                    <ProgressBar key={i} label={lv.name} value={lv.v} max={a.n}
+                      color={['bg-green-500','bg-yellow-500','bg-orange-500','bg-red-500'][i]} />
+                  ))}
+                </div>
+              </div>
+              <div className="h-56 mb-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <RadarChart cx="50%" cy="50%" outerRadius="70%" data={a.bsrsRadar}>
+                    <PolarGrid />
+                    <PolarAngleAxis dataKey="s" tick={{fontSize:11}} />
+                    <PolarRadiusAxis angle={30} domain={[0,4]} tick={{fontSize:10}} />
+                    <Radar name="BSRS各題均分" dataKey="v" stroke={C.purple} fill={C.purple} fillOpacity={0.4} />
+                    <RTooltip />
+                    <Legend />
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="text-xs font-semibold text-slate-600 mb-2 flex items-center gap-1">
+                <i className="fa-solid fa-comment-medical text-blue-500"></i>員工回饋留言
+              </p>
+              <div className="max-h-44 overflow-y-auto bg-slate-50 rounded-lg p-3 border border-slate-200 no-scrollbar">
+                {data.filter(d=>d.feedback.trim()).length > 0
+                  ? data.filter(d=>d.feedback.trim()).map((d,i)=>(
+                    <div key={i} className="mb-2 pb-2 border-b border-slate-200 last:border-0">
+                      <span className="text-xs font-bold text-slate-400 bg-slate-200 px-2 py-0.5 rounded mr-2">{d.dept}</span>
+                      <span className="text-sm text-slate-700">{d.feedback}</span>
+                    </div>
+                  ))
+                  : <p className="text-sm text-slate-400 text-center py-4">目前無留言</p>
+                }
+              </div>
+            </SectionCard>
+
+            {/* 第六區：單位交叉分析 */}
+            <SectionCard title="第六區：各單位交叉分析" icon="fa-chart-pie" borderColor="border-slate-400">
+              <p className="text-xs font-semibold text-slate-600 mb-2">各單位平均疲勞與BSRS分數</p>
+              <div className="h-56 mb-5">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={a.deptArr} margin={{top:5,right:5,left:-20,bottom:5}}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="name" tick={{fontSize:11}} />
+                    <YAxis yAxisId="left" orientation="left" stroke={C.orange} tick={{fontSize:10}} />
+                    <YAxis yAxisId="right" orientation="right" stroke={C.purple} tick={{fontSize:10}} />
+                    <RTooltip />
+                    <Legend wrapperStyle={{fontSize:11}} />
+                    <Bar yAxisId="left" name="個人疲勞均分" dataKey="pfAvg" fill={C.orange} radius={[4,4,0,0]} />
+                    <Bar yAxisId="left" name="工作疲勞均分" dataKey="wfAvg" fill={C.yellow} radius={[4,4,0,0]} />
+                    <Bar yAxisId="right" name="BSRS均分" dataKey="bsrsAvg" fill={C.purple} radius={[4,4,0,0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* 各單位肌骨症狀比例 (補缺漏10 – 熱力表格) */}
+              <p className="text-xs font-semibold text-slate-600 mb-2">各單位健康風險集中度</p>
+              <SmallTable
+                cols={[
+                  { h:'單位', k:'name' },
+                  { h:'人數', k:'count' },
+                  { h:'高風險', r:r=><span className={r.high>0?'font-bold text-red-500':'text-slate-400'}>{r.high}</span> },
+                  { h:'個人疲勞', r:r=>(
+                    <div className="flex items-center gap-1">
+                      <span className={r.pfAvg>=50?'font-bold text-red-500':r.pfAvg>=25?'text-yellow-600':'text-green-600'}>{r.pfAvg}</span>
+                      <div className="w-12 h-1.5 rounded bg-slate-200 overflow-hidden">
+                        <div className={`h-full rounded ${r.pfAvg>=50?'bg-red-500':r.pfAvg>=25?'bg-yellow-400':'bg-green-400'}`} style={{width:`${r.pfAvg}%`}}></div>
+                      </div>
+                    </div>
+                  )},
+                  { h:'工作疲勞', r:r=>(
+                    <div className="flex items-center gap-1">
+                      <span className={r.wfAvg>=50?'font-bold text-red-500':r.wfAvg>=25?'text-yellow-600':'text-green-600'}>{r.wfAvg}</span>
+                      <div className="w-12 h-1.5 rounded bg-slate-200 overflow-hidden">
+                        <div className={`h-full rounded ${r.wfAvg>=50?'bg-red-500':r.wfAvg>=25?'bg-yellow-400':'bg-green-400'}`} style={{width:`${r.wfAvg}%`}}></div>
+                      </div>
+                    </div>
+                  )},
+                  { h:'肌骨異常%', r:r=>(
+                    <span className={`risk-badge ${r.mskRate>30?'bg-orange-100 text-orange-700':r.mskRate>15?'bg-yellow-100 text-yellow-700':'bg-green-100 text-green-700'}`}>
+                      {r.mskRate}%
+                    </span>
+                  )},
+                  { h:'BSRS均分', r:r=>(
+                    <span className={r.bsrsAvg>=6?'font-bold text-purple-600':r.bsrsAvg>=3?'text-yellow-600':'text-green-600'}>{r.bsrsAvg}</span>
+                  )}
+                ]}
+                rows={a.deptArr}
+                maxH="max-h-60"
+              />
+            </SectionCard>
+
+          </div>
+
+          <footer className="mt-8 text-center text-xs text-slate-400 pb-6">
+            國產建材實業股份有限公司 職業安全衛生管理部門 ｜ 2026年度員工健康問卷分析儀表板<br />
+            每5分鐘自動同步Google Sheets問卷資料 ｜ 資料來源：{srcLabel}
+          </footer>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+    document.getElementById('initial-loader').style.display = 'none';
+  </script>
+</body>
+</html>
